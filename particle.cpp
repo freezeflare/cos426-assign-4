@@ -180,7 +180,7 @@ void UpdateParticles(R3Scene *scene, double current_time, double delta_time, int
 		R3Point new_pos = old_pos;
 		new_pos += velocity * delta_time;
 
-		R3Vector f = gravity - cur_par -> drag * velocity;
+		R3Vector f = gravity * cur_par -> mass - cur_par -> drag * velocity;
 
 		if (!CalcSinkForce(scene, &f, i, new_pos))
 		{
@@ -216,8 +216,6 @@ void UpdateParticles(R3Scene *scene, double current_time, double delta_time, int
 			double ks = cur_spring -> ks;
 			double kd = cur_spring -> kd;
 			
-			if (d < s)
-				printf("d is %f\n", d);
 			f += (ks * (d - s) + kd * (v2 - v1).Dot(D)) * D;
 			//f += ks* (d - s) * D;
 		}
