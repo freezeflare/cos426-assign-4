@@ -107,7 +107,50 @@ void GenerateParticles(R3Scene *scene, double current_time, double delta_time)
 
 }
 
+//Delete Particle
+void DeleteParticle(R3Scene *scene, int index)
+{
+	int nparticles = scene -> NParticles() - 1;
+	scene -> particles[index] = scene -> particles[nparticles];
+	scene -> particles.pop_back();
+}
 
+//Calculate force for sink
+bool CalcSinkForce(R3Scene *scene, R3Vector* f, int index, R3Point new_pos)
+{
+	int nsinks = scene -> NParticleSinks();
+	for (int j = 0; j < nsinks; j++)
+	{
+		R3ParticleSink* sink = scene -> ParticleSink(j);
+		double ca = sink -> constant_attenuation;
+		double la = sink -> linear_attenuation;
+		double qa = sink -> quadratic_attenuation;
+
+		R3ShapeType type = sink -> shape -> type;
+
+		if (type == R3_SPHERE_SHAPE)
+		{
+			R3Sphere* s = sink -> shape -> sphere;
+			double r = s -> Radius();
+			R3Point cen = s -> Center();
+
+			double d = R3Distance(new_pos, cen) - r;
+			if (d < 0)
+			{
+				DeleteParticle(scene, index);
+			  return false;
+			}
+			else
+			{
+				R3Vector V = cen - new_pos;
+				V.Normalize();
+				V *= sink -> intensity/(ca + la * d + qa * d * d);
+				*f += V;
+			}
+		}
+	}
+	return true;
+}
 
 ////////////////////////////////////////////////////////////
 // Updating Particles
@@ -126,9 +169,8 @@ void UpdateParticles(R3Scene *scene, double current_time, double delta_time, int
 		//particle lifetimes 
 		if (cur_par -> lifetime < current_time && cur_par -> lifetime > 0)
 		{
+			DeleteParticle(scene, i);
 			nparticles--;
-			scene -> particles[i] = scene -> particles[nparticles];
-			scene -> particles.pop_back();
 			i--;
 			continue;
 		}
@@ -140,65 +182,44 @@ void UpdateParticles(R3Scene *scene, double current_time, double delta_time, int
 
 		R3Vector f = gravity - cur_par -> drag * velocity;
 
-		int nsinks = scene -> NParticleSinks();
-		bool deleted = false;
-		for (int j = 0; j < nsinks; j++)
+		if (!CalcSinkForce(scene, &f, i, new_pos))
 		{
-			R3ParticleSink* sink = scene -> ParticleSink(j);
-			double ca = sink -> constant_attenuation;
-			double la = sink -> linear_attenuation;
-			double qa = sink -> quadratic_attenuation;
-
-			R3ShapeType type = sink -> shape -> type;
-
-			if (type == R3_SPHERE_SHAPE)
-			{
-				R3Sphere* s = sink -> shape -> sphere;
-				double r = s -> Radius();
-				R3Point cen = s -> Center();
-				
-				double d = R3Distance(new_pos, cen) - r;
-				if (d < 0)
-				{
-					nparticles--;
-					scene -> particles[i] = scene -> particles[nparticles];
-					scene -> particles.pop_back();
-					i--;
-					deleted = true;
-					break;
-				}
-				else
-				{
-					R3Vector V = cen - new_pos;
-					V.Normalize();
-					V *= sink -> intensity/(ca + la * d + qa * d * d);
-					f += V;
-				}
-			}
-		}
-		if (deleted)
+			nparticles--;
+			i--;
 			continue;
+		}
 
 		for (unsigned int k = 0; k < cur_par -> springs.size(); k++)
 		{
 			R3ParticleSpring* cur_spring = cur_par -> springs[k];
-			R3Particle* par1 = cur_spring -> particles[0];
-			R3Particle* par2 = cur_spring -> particles[1];
-			R3Point p1 = par1 -> position;
-			R3Point p2 = par2 -> position;
+			R3Particle* par1;
+			R3Particle* par2;
+			if (cur_par == cur_spring -> particles[0])
+			{
+				par1 = cur_spring -> particles[0];
+				par2 = cur_spring -> particles[1];
+			}
+			else
+			{
+				par2 = cur_spring -> particles[0];
+				par1 = cur_spring -> particles[1];
+			}
+			R3Point p = par1 -> position;
+			R3Point q = par2 -> position;
 			R3Vector v1 = par1 -> velocity;
 			R3Vector v2 = par2 -> velocity;
 
-			R3Vector diff = p2 - p1;
+			R3Vector diff = q - p;
 			double d = diff.Dot(diff);
-			if (d == 0) continue;
 			R3Vector D = diff/(d);
 			double s = cur_spring -> rest_length;
 			double ks = cur_spring -> ks;
 			double kd = cur_spring -> kd;
 			
-			//f += (ks * (d - s) + kd * (v2 - v1).Dot(D)) * D;
-			f += ks* (d - s) * D;
+			if (d < s)
+				printf("d is %f\n", d);
+			f += (ks * (d - s) + kd * (v2 - v1).Dot(D)) * D;
+			//f += ks* (d - s) * D;
 		}
 
 		cur_par -> velocity += delta_time * f/ cur_par -> mass;
