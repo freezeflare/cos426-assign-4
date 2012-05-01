@@ -8,13 +8,13 @@
 #include "R3/R3.h"
 #include "R3Scene.h"
 #include "particle.h"
+#include "raytrace.h"
 using namespace std;
 #ifdef _WIN32
 #   include <windows.h>
 #else
 #   include <sys/time.h>
 #endif
-
 
 
 
@@ -56,55 +56,440 @@ double RandomNumber(void)
 ////////////////////////////////////////////////////////////
 // Generating Particles
 ////////////////////////////////////////////////////////////
+R3Vector GetVelocPlane(R3ParticleSource* ps, R3Vector N)
+{
+	double rand1 = RandomNumber();
+	double rand2 = RandomNumber();
+	double rand3 = RandomNumber();
+
+	R3Vector V(0, 0, 0);
+
+	//get A
+	R3Vector A(rand1, rand2, rand3);
+	A.Cross(N);
+
+	double t1 = RandomNumber() * 2 * M_PI;
+	double t2 = RandomNumber() * sin(ps -> angle_cutoff);
+
+	A.Rotate(N, t1);
+	R3Vector copy_A(A);
+	copy_A.Cross(N);
+	A.Rotate(copy_A, acos(t2));
+
+	V = A;
+	V *= RandomNumber();
+	V *= ps -> velocity;
+
+	return V;
+
+}
+
+
+
+void CreateSphereParticle(R3ParticleSource* ps, R3Scene* scene)
+{
+	R3Sphere* s = ps -> shape -> sphere;
+	double r = s -> Radius();
+	R3Point cen = s -> Center();
+	double cen_x = cen.X();
+	double cen_y = cen.Y();
+	double cen_z = cen.Z();
+
+	double z = RandomNumber() * 2 * r - r;
+	double phi = RandomNumber() * 2 * M_PI;
+
+	double d = sqrt(r * r - z * z);
+	double px = cen_x + d * cos(phi);
+	double py = cen_y + d * sin(phi);
+	double pz = cen_z + z;
+
+	R3Point rand_pt(px, py, pz);
+	R3Vector N = rand_pt - cen;
+	R3Vector V = GetVelocPlane(ps, N);
+
+	R3Particle* p = new R3Particle();
+	p -> position = rand_pt;
+	p -> velocity = V;
+	p -> mass = ps -> mass;
+	p -> fixed = ps -> fixed;
+	p -> drag = ps -> drag;
+	p -> elasticity = ps -> elasticity;
+	p -> lifetime = ps -> lifetime;
+	p -> material = ps -> material;
+
+	scene -> particles.push_back(p);
+}
+
+R3Point Point_Triangle(vector<R3Point> tri)
+{
+	double rand1 = RandomNumber();
+	double rand2 = RandomNumber();
+	while(rand1 + rand2 > 1)
+		rand2 = RandomNumber();
+
+	double rand3 = 1 - rand1 - rand2;
+	R3Point pt = rand1 * tri[0] + rand2 * tri[1] + rand3 * tri[2];
+
+	return pt;
+}
+
+R3Point Point_Rect(double min1, double max1, double min2, double max2, 
+		               double other, char axis) 
+{
+	double diff1 = max1 - min1;
+	double diff2 = max2 - min2;
+
+	double c1 = RandomNumber() * diff1 + min1;
+	double c2 = RandomNumber() * diff2 + min2;
+
+	R3Point pt;
+
+	switch (axis)
+	{
+		case 'z':
+			pt = R3Point(c1, c2, other);
+			break;
+		case 'y':
+			pt = R3Point(c1, other, c2);
+			break;
+		case 'x':
+			pt = R3Point(other, c1, c2);
+			break;
+	}
+
+	return pt;
+}
+
+R3Point Point_Circle(R3Circle* c)
+{
+	R3Point cen = c -> Center();
+	double radius = c -> Radius();
+	R3Vector N = c -> Normal();
+	R3Vector flip_N = c -> Normal();
+	flip_N.Flip();
+	double rand1 = RandomNumber();
+	double rand2 = RandomNumber();
+	double rand3 = RandomNumber();
+
+	R3Vector vec1(rand1, rand2, rand3);
+	vec1.Cross(N);
+	R3Vector vec2 = vec1;
+
+	vec2.Rotate(N, M_PI/2);
+
+	vec1.Normalize();
+	vec2.Normalize();
+
+	double r = RandomNumber();
+	double theta = RandomNumber() * M_PI * 2;
+
+	double x = sqrt(r) * cos(theta) * radius;
+	double y = sqrt(r) * sin(theta) * radius;
+
+	R3Point pt = cen + x * vec1 + y * vec2;
+
+	return pt;
+}
+
+
+void CreateMeshParticle(R3ParticleSource* ps, R3Scene* scene)
+{
+	R3Mesh* m = ps -> shape -> mesh;
+	int nfaces = m -> NFaces();
+	
+	double rand_num = RandomNumber() * nfaces;
+	int face_num = floor(rand_num);
+
+	R3MeshFace* face = m -> Face(face_num);
+	R3Vector N = face -> plane.Normal();
+
+	R3Vector V = GetVelocPlane(ps, N);
+	
+	//get the point within triangle
+	vector<R3Point> tri;
+	for (unsigned int i = 0; i < face -> vertices.size(); i++)
+		tri.push_back(face -> vertices[i] -> position);
+
+	R3Point pt = Point_Triangle(tri);
+
+	R3Particle* p = new R3Particle();
+	p -> position = pt;
+	p -> velocity = V;
+	p -> mass = ps -> mass;
+	p -> fixed = ps -> fixed;
+	p -> drag = ps -> drag;
+	p -> elasticity = ps -> elasticity;
+	p -> lifetime = ps -> lifetime;
+	p -> material = ps -> material;
+
+	scene -> particles.push_back(p);
+}
+
+void CreateBoxParticle(R3ParticleSource* ps, R3Scene* scene)
+{
+	R3Box* box = ps -> shape -> box;
+	
+	//corners of the cube
+	R3Point p000 = box -> Corner(0, 0, 0);
+	R3Point p100 = box -> Corner(1, 0, 0);
+	R3Point p010 = box -> Corner(0, 1, 0);
+	R3Point p001 = box -> Corner(0, 0, 1);
+	R3Point p110 = box -> Corner(1, 1, 0);
+	R3Point p101 = box -> Corner(1, 0, 1);
+	R3Point p011 = box -> Corner(0, 1, 1);
+	R3Point p111 = box -> Corner(1, 1, 1);
+
+	double xmin = box -> XMin();
+	double xmax = box -> XMax();
+	double ymin = box -> YMin(); 
+	double ymax = box -> YMax();
+	double zmin = box ->ZMin();
+	double zmax = box ->ZMax();
+
+	//check if the min/maxes are reversed
+	double temp;
+	if (xmin > xmax)
+	{
+		temp = xmin;
+		xmin = xmax;
+		xmax = temp;
+	}
+
+	if (ymin > ymax)
+	{
+		temp = ymin;
+		ymin = ymax;
+		ymax = temp;
+	}
+
+	if (zmin > zmax)
+	{
+		temp = zmin;
+		zmin = zmax;
+		zmax = temp;
+	}
+
+
+
+	//make faces with corners
+	vector<R3Plane*> faces; 
+	vector<char> tables;
+	vector<double> constant_val;
+	faces.push_back(new R3Plane(p000, p010, p110)); //000, 010, 110, 100, no z
+	tables.push_back('z');
+	constant_val.push_back(p000.Z());
+	faces.push_back(new R3Plane(p000, p001, p101)); //000, 001, 101, 100, no y
+	tables.push_back('y');
+	constant_val.push_back(p000.Y());
+	faces.push_back(new R3Plane(p000, p010, p011)); //000, 010, 011, 001, no x
+	tables.push_back('x');
+	constant_val.push_back(p000.X());
+	faces.push_back(new R3Plane(p010, p011, p111)); //010, 011, 111, 110, no y
+	tables.push_back('y');
+	constant_val.push_back(p010.Y());
+	faces.push_back(new R3Plane(p001, p011, p111)); //001, 011, 111, 101, no z
+	tables.push_back('z');
+	constant_val.push_back(p001.Z());
+	faces.push_back(new R3Plane(p100, p110, p111)); //100, 110, 111, 101, no x
+	tables.push_back('x');
+	constant_val.push_back(p100.X());
+	
+	double rand_num = RandomNumber() * faces.size();
+	int face_num = floor(rand_num);
+
+	R3Plane* face = faces[face_num];
+	R3Vector N = face -> Normal();
+
+	R3Vector V = GetVelocPlane(ps, N);
+	
+	R3Point pt;
+
+	switch (tables[face_num])
+	{
+		case 'z':
+			pt = Point_Rect(xmin, xmax, ymin, ymax, constant_val[face_num], tables[face_num]);
+			break;
+		case 'y':
+			pt = Point_Rect(xmin, xmax, zmin, zmax, constant_val[face_num], tables[face_num]);
+			break;
+		case 'x':
+			pt = Point_Rect(ymin, ymax, zmin, zmax, constant_val[face_num], tables[face_num]);
+			break;
+	}
+
+	R3Particle* p = new R3Particle();
+	p -> position = pt;
+	p -> velocity = V;
+	p -> mass = ps -> mass;
+	p -> fixed = ps -> fixed;
+	p -> drag = ps -> drag;
+	p -> elasticity = ps -> elasticity;
+	p -> lifetime = ps -> lifetime;
+	p -> material = ps -> material;
+
+	scene -> particles.push_back(p);
+}
+
+void CreateCircleParticle(R3ParticleSource* ps, R3Scene* scene)
+{
+	R3Circle* c = ps -> shape -> circle;
+	
+	R3Vector N = c -> Normal();
+
+	R3Vector V = GetVelocPlane(ps, N);
+
+	R3Point pt = Point_Circle(c);
+
+	R3Particle* p = new R3Particle();
+	p -> position = pt;
+	p -> velocity = V;
+	p -> mass = ps -> mass;
+	p -> fixed = ps -> fixed;
+	p -> drag = ps -> drag;
+	p -> elasticity = ps -> elasticity;
+	p -> lifetime = ps -> lifetime;
+	p -> material = ps -> material;
+
+	scene -> particles.push_back(p);
+}
+
 
 void GenerateParticles(R3Scene *scene, double current_time, double delta_time)
 {
   // Generate new particles for every source
-	
+	static double last_call_time = 0;
 	int npsources = scene -> NParticleSources();
+
+	int count = floor(current_time - last_call_time);
+	last_call_time = current_time;
 
 	for (int i = 0; i < npsources; i++)
 	{
 		R3ParticleSource* ps = scene -> ParticleSource(i); 
-
+		double rate = ps -> rate;
 		R3ShapeType type = ps -> shape -> type;
+
+		//not supported
+		if (type != R3_SPHERE_SHAPE || type != R3_MESH_SHAPE
+				|| type != R3_BOX_SHAPE || type != R3_CIRCLE_SHAPE)
+			continue;
 	
-		if (type == R3_SPHERE_SHAPE)
+		//create particles according to rate
+		while (count > 0)
 		{
-			R3Sphere* s = ps -> shape -> sphere;
-			double r = s -> Radius();
-			R3Point cen = s -> Center();
-			double cen_x = cen.X();
-			double cen_y = cen.Y();
-			double cen_z = cen.Z();
-
-			double z = RandomNumber() * 2 * r - r;
-			double phi = RandomNumber() * 2 * M_PI;
-
-			double d = sqrt(r * r - z * z);
-			double px = cen_x + d * cos(phi);
-			double py = cen_y + d * sin(phi);
-			double pz = cen_z + z;
-
-			R3Point rand_pt(px, py, pz);
-			R3Vector V = rand_pt - cen;
-			V *= RandomNumber();
-			V *= ps -> velocity;
-			
-			R3Particle* p = new R3Particle();
-			p -> position = rand_pt;
-			p -> velocity = V;
-			p -> mass = ps -> mass;
-			p -> fixed = ps -> fixed;
-			p -> drag = ps -> drag;
-			p -> elasticity = ps -> elasticity;
-			p -> lifetime = ps -> lifetime;
-			p -> material = ps -> material;
-
-			scene -> particles.push_back(p);
+			int num_prod = 0;
+			while (num_prod < rate)
+			{
+				printf("??\n");
+				if (type == R3_SPHERE_SHAPE)
+					CreateSphereParticle(ps, scene);
+				else if (type == R3_MESH_SHAPE)
+					CreateMeshParticle(ps, scene);
+				else if (type == R3_BOX_SHAPE)
+					CreateBoxParticle(ps, scene);
+				else if (type == R3_CIRCLE_SHAPE)
+					CreateCircleParticle(ps, scene);
+				num_prod++;
+			}
+			count--;
 		}
 	}
 
+}
+
+//Delete Particle
+void DeleteParticle(R3Scene *scene, int index)
+{
+	int nparticles = scene -> NParticles() - 1;
+	scene -> particles[index] = scene -> particles[nparticles];
+	scene -> particles.pop_back();
+}
+
+//Calculate force for sink
+bool CalcSinkForce(R3Scene *scene, R3Vector* f, int index, R3Point new_pos)
+{
+	int nsinks = scene -> NParticleSinks();
+	for (int j = 0; j < nsinks; j++)
+	{
+		R3ParticleSink* sink = scene -> ParticleSink(j);
+		double ca = sink -> constant_attenuation;
+		double la = sink -> linear_attenuation;
+		double qa = sink -> quadratic_attenuation;
+
+		R3ShapeType type = sink -> shape -> type;
+
+		if (type == R3_SPHERE_SHAPE)
+		{
+			R3Sphere* s = sink -> shape -> sphere;
+			double r = s -> Radius();
+			R3Point cen = s -> Center();
+
+			double d = R3Distance(new_pos, cen) - r;
+			if (d < 0)
+			{
+				DeleteParticle(scene, index);
+			  return false;
+			}
+			else
+			{
+				R3Vector V = cen - new_pos;
+				V.Normalize();
+				V *= sink -> intensity/(ca + la * d + qa * d * d);
+				*f += V;
+			}
+		}
+	}
+	return true;
+}
+
+void CalcAttractForce(R3Scene* scene, R3Vector* f, int index)
+{
+	R3Particle* p1 = scene -> Particle(index);
+	double m1 = p1 -> mass;
+	R3Point pos1 = p1 -> position;
+
+	for (int i = 0 ; i < scene -> NParticles(); i++)
+	{
+		if (i == index) continue;
+
+		R3Particle* p2 = scene -> Particle(i);
+		double m2 = p2 -> mass;
+		R3Point pos2 = p2 -> position;
+
+		R3Vector between = pos2 - pos1;
+		between.Normalize();
+
+		double r = R3Distance(pos1, pos2);
+		if (r == 0) continue;
+
+	//	printf("r is %f\n", r);
+
+		*f += 6.67384 * pow(10, -11) * m1 * m2/ (r * r) * between;
+	}
+}
+
+void CalcBounce(R3Particle* par, R3Intersect info, R3Vector* new_direction)
+{
+	double elas = par -> elasticity;
+	R3Vector velocity = par -> velocity;
+
+	R3Vector specular = 2 * (info.info.normal.Dot(velocity)) 
+								* info.info.normal - velocity;
+	double mag = sqrt(velocity.Dot(velocity));
+
+	//specular direction
+	if (elas == 1)
+	{
+		*new_direction = mag * specular;
+	}
+	else
+	{
+		R3Vector spec_norm = (specular.Dot(info.info.normal)) * specular;
+		R3Vector spec_tang = specular - spec_norm;
+
+		spec_norm *= elas;
+		*new_direction = mag * (spec_norm + spec_tang);
+	}
 }
 
 
@@ -117,93 +502,112 @@ void UpdateParticles(R3Scene *scene, double current_time, double delta_time, int
 {
   // Update position for every particle
 
-	int nparticles = scene -> NParticles();
 	R3Vector gravity = scene -> gravity;
 
-	for (int i = 0; i < nparticles; i++)
+	vector<R3Vector> accel;
+
+	for (int i = 0; i < scene -> NParticles(); i++)
 	{
 		R3Particle * cur_par = scene -> Particle(i);
+
+
+
+		if (cur_par -> fixed) 
+		{
+			accel.push_back(R3Vector(0,0,0));
+			continue;
+		}
+
+
 		//particle lifetimes 
 		if (cur_par -> lifetime < current_time && cur_par -> lifetime > 0)
 		{
-			nparticles--;
-			scene -> particles[i] = scene -> particles[nparticles];
-			scene -> particles.pop_back();
+			DeleteParticle(scene, i);
 			i--;
 			continue;
 		}
 
-		R3Point old_pos = cur_par -> position;
 		R3Vector velocity = cur_par -> velocity;
-		R3Point new_pos = old_pos;
-		new_pos += velocity * delta_time;
+		R3Vector f = gravity * cur_par -> mass - cur_par -> drag * velocity;
 
-		R3Vector f = gravity - cur_par -> drag * velocity;
-
-		int nsinks = scene -> NParticleSinks();
-		bool deleted = false;
-		for (int j = 0; j < nsinks; j++)
+		if (!CalcSinkForce(scene, &f, i, cur_par -> position))
 		{
-			R3ParticleSink* sink = scene -> ParticleSink(j);
-			double ca = sink -> constant_attenuation;
-			double la = sink -> linear_attenuation;
-			double qa = sink -> quadratic_attenuation;
-
-			R3ShapeType type = sink -> shape -> type;
-
-			if (type == R3_SPHERE_SHAPE)
-			{
-				R3Sphere* s = sink -> shape -> sphere;
-				double r = s -> Radius();
-				R3Point cen = s -> Center();
-				
-				double d = R3Distance(new_pos, cen) - r;
-				if (d < 0)
-				{
-					nparticles--;
-					scene -> particles[i] = scene -> particles[nparticles];
-					scene -> particles.pop_back();
-					i--;
-					deleted = true;
-					break;
-				}
-				else
-				{
-					R3Vector V = cen - new_pos;
-					V.Normalize();
-					V *= sink -> intensity/(ca + la * d + qa * d * d);
-					f += V;
-				}
-			}
-		}
-		if (deleted)
+			i--;
 			continue;
+		}
 
+		//springs
 		for (unsigned int k = 0; k < cur_par -> springs.size(); k++)
 		{
 			R3ParticleSpring* cur_spring = cur_par -> springs[k];
-			R3Particle* par1 = cur_spring -> particles[0];
-			R3Particle* par2 = cur_spring -> particles[1];
-			R3Point p1 = par1 -> position;
-			R3Point p2 = par2 -> position;
+			R3Particle* par1;
+			R3Particle* par2;
+			if (cur_par == cur_spring -> particles[0])
+			{
+				par1 = cur_spring -> particles[0];
+				par2 = cur_spring -> particles[1];
+			}
+			else
+			{
+				par2 = cur_spring -> particles[0];
+				par1 = cur_spring -> particles[1];
+			}
+			R3Point p = par1 -> position;
+			R3Point q = par2 -> position;
 			R3Vector v1 = par1 -> velocity;
 			R3Vector v2 = par2 -> velocity;
 
-			R3Vector diff = p2 - p1;
-			double d = diff.Dot(diff);
+			R3Vector diff = q - p;
+			double d = sqrt(diff.Dot(diff));
 			R3Vector D = diff/(d);
 			double s = cur_spring -> rest_length;
 			double ks = cur_spring -> ks;
 			double kd = cur_spring -> kd;
 			
-			//f += (ks * (d - s) + kd * (v2 - v1).Dot(D)) * D;
-			f += ks* (d - s) * D;
+			f += (ks * (d - s) + kd * (v2 - v1).Dot(D)) * D;
 		}
 
-		cur_par -> velocity += delta_time * f/ cur_par -> mass;
+		CalcAttractForce(scene, &f, i);
+
+		accel.push_back(f);
+	}
+
+	for (int i = 0; i < scene -> NParticles(); i++)
+	{
+		R3Particle* cur_par = scene -> Particle(i);
+		R3Point new_pos = cur_par -> position;
+
+		cur_par -> velocity += delta_time * accel[i]/ cur_par -> mass;
+
+		//intersect scene objects?
+		R3Ray* cur_ray = new R3Ray(cur_par -> position, cur_par -> velocity);
+		R3Intersect info = Intersect_scene(cur_ray, scene, NULL);
+		double time_increment = 0;
+
+		while (info.hit)
+		{
+			double new_delta_t = delta_time - time_increment;
+			double mag_v = sqrt(cur_par -> velocity.Dot(cur_par -> velocity));
+			time_increment += info.info.t/mag_v;
+
+			R3Vector new_direction(0, 0, 0);
+			new_pos = info.info.position;
+			if (info.info.t/mag_v < new_delta_t)
+				CalcBounce(cur_par, info, &new_direction);
+			else
+				break;
+
+			cur_par -> velocity = new_direction;
+			cur_par -> position = new_pos;
+
+			cur_ray = new R3Ray(new_pos, new_direction);
+			info = Intersect_scene(cur_ray, scene, NULL);
+		}
+
+		
+		new_pos += cur_par->velocity * delta_time;
 
 		cur_par -> position = new_pos;
-
 	}
    
 }
@@ -224,7 +628,10 @@ void RenderParticles(R3Scene *scene, double current_time, double delta_time)
   glBegin(GL_POINTS);
   for (int i = 0; i < scene->NParticles(); i++) {
     R3Particle *particle = scene->Particle(i);
-    glColor3d(particle->material->kd[0], particle->material->kd[1], particle->material->kd[2]);
+		R3Vector velocity = particle -> velocity;
+		double factor = sqrt(velocity.Dot(velocity));
+    glColor3d(particle->material->kd[0] + factor, 
+				particle->material->kd[1] + factor, particle->material->kd[2] + factor);
     const R3Point& position = particle->position;
     glVertex3d(position[0], position[1], position[2]);
   }   
